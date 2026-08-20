@@ -1,5 +1,6 @@
 /*
  * SPDX-FileCopyrightText: 2020 Inria
+ * SPDX-FileCopyrightText: 2024-2026 HAW Hamburg
  * SPDX-License-Identifier: LGPL-2.1-only
  */
 
@@ -14,6 +15,7 @@
  * @file
  *
  * @author      Alexandre Abadie <alexandre.abadie@inria.fr>
+ * @author      Ben Wehrberger <ben.wehrberger@haw-hamburg.de>
  *
  */
 
@@ -41,28 +43,41 @@ typedef enum {
  * @brief   Default PDM min gain values (in dB)
  */
 #ifndef PDM_GAIN_MIN
-#define PDM_GAIN_MIN        (-20)
+#  define PDM_GAIN_MIN        (-20)
 #endif
 
 /**
  * @brief   Default PDM max gain values (in dB)
  */
 #ifndef PDM_GAIN_MAX
-#define PDM_GAIN_MAX        (20)
+#  define PDM_GAIN_MAX        (20)
 #endif
 
 /**
  * @brief   Default PDM samples frame buffer size
  */
 #ifndef PDM_BUF_SIZE
-#define PDM_BUF_SIZE        (64U)
+#  define PDM_BUF_SIZE        (64U)
+#endif
+
+/**
+ * @brief   Startup backoff in ms during which samples are discarded while the
+ *          peripheral settles
+ *
+ * @note    The microphone settling/startup artifact is longer and depends on
+ *          the configuration, so the default does not cover it. Increase
+ *          PDM_BACKOFF_MS accordingly if the application needs clean samples
+ *          from the first sample.
+ */
+#ifndef PDM_BACKOFF_MS
+#  define PDM_BACKOFF_MS      (15U)
 #endif
 
 /**
  * @brief   Signature for data received interrupt callback
  *
- * @param[in] arg           context to the callback (optional)
- * @param[in] buf           the buffer containing the current samples frame
+ * @param[in] arg       context to the callback (optional)
+ * @param[in] buf       the buffer containing the current samples frame
  */
 typedef void (*pdm_data_cb_t)(void *arg, int16_t *buf);
 
