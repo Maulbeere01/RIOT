@@ -60,6 +60,7 @@ int16_t _pdm_buf[PDM_BUF_SIZE * 2] = { 0 };
 static pdm_isr_ctx_t isr_ctx;
 static uint32_t _backoff_buffers;
 static volatile uint32_t _backoff_buffers_left;
+static volatile uint8_t _pdm_stopped = 1;
 static uint8_t _pdm_current_buf = 0;
 static uint8_t _pdm_next_buf = 0;
 
@@ -193,7 +194,9 @@ void pdm_start(void)
 {
     _pdm_next_buf = 0;
     _pdm_current_buf = 0;
+    _pdm_stopped = 0;
     _backoff_buffers_left = _backoff_buffers;
+
     NRF_PDM->SAMPLE.PTR = (uint32_t)_pdm_buf;
     DEBUG("[PDM] MAXCNT: %lu\n", NRF_PDM->SAMPLE.MAXCNT);
 
@@ -203,6 +206,9 @@ void pdm_start(void)
 void pdm_stop(void)
 {
     NRF_PDM->TASKS_STOP = 1;
+
+    /* restarting before STOPPED is received is unpredictable behaviour */
+    while (!_pdm_stopped) {}
 }
 
 void isr_pdm(void)
@@ -213,11 +219,6 @@ void isr_pdm(void)
 
         _pdm_next_buf ^= 1;
         NRF_PDM->SAMPLE.PTR = (uint32_t)&_pdm_buf[_pdm_next_buf * (PDM_BUF_SIZE)];
-    }
-
-    /* PDM transfer has finished */
-    if (NRF_PDM->EVENTS_STOPPED == 1) {
-        NRF_PDM->EVENTS_STOPPED = 0;
     }
 
     /* requested number of samples written to RAM */
@@ -235,6 +236,12 @@ void isr_pdm(void)
 
         /* Set next buffer */
         _pdm_current_buf ^= 1;
+    }
+
+    /* PDM transfer has finished */
+    if (NRF_PDM->EVENTS_STOPPED == 1) {
+        NRF_PDM->EVENTS_STOPPED = 0;
+        _pdm_stopped = 1;
     }
 
     cortexm_isr_end();
