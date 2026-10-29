@@ -37,6 +37,19 @@ extern "C" {
 #endif
 
 /**
+ * @name    DMA streams configuration
+ * @{
+ */
+static const dma_conf_t dma_config[] = {
+    { .stream = 3 },    /* DMA1 Channel 4 - DFSDM1_FLT0 */
+};
+
+#define DMA_0_ISR           isr_dma1_channel4
+
+#define DMA_NUMOF           ARRAY_SIZE(dma_config)
+/** @} */
+
+/**
  * @name    UART configuration
  * @{
  */
@@ -52,6 +65,10 @@ static const uart_conf_t uart_config[] = {
         .irqn       = USART2_IRQn,
         .type       = STM32_USART,
         .clk_src    = 0, /* Use APB clock */
+#ifdef MODULE_PERIPH_DMA
+        .dma        = DMA_STREAM_UNDEF,
+        .dma_chan   = UINT8_MAX,
+#endif
     },
     {
         .dev        = USART3,
@@ -64,6 +81,10 @@ static const uart_conf_t uart_config[] = {
         .irqn       = USART3_IRQn,
         .type       = STM32_USART,
         .clk_src    = 0, /* Use APB clock */
+#ifdef MODULE_PERIPH_DMA
+        .dma        = DMA_STREAM_UNDEF,
+        .dma_chan   = UINT8_MAX,
+#endif
     }
 };
 
@@ -109,7 +130,13 @@ static const spi_conf_t spi_config[] = {
         .sclk_af  = GPIO_AF5,
         .cs_af    = GPIO_AF5,
         .rccmask  = RCC_APB2ENR_SPI1EN,
-        .apbbus   = APB2
+        .apbbus   = APB2,
+#ifdef MODULE_PERIPH_DMA
+        .tx_dma      = DMA_STREAM_UNDEF,
+        .tx_dma_chan = UINT8_MAX,
+        .rx_dma      = DMA_STREAM_UNDEF,
+        .rx_dma_chan = UINT8_MAX,
+#endif
     },
 };
 
@@ -165,6 +192,21 @@ static const adc_conf_t adc_config[] = {
  */
 #define VBAT_ADC            ADC_LINE(6)
 
+/** @} */
+
+/**
+ * @name    PDM configuration
+ * @{
+ */
+static const pdm_conf_t pdm_config = {
+    .din_pin  = GPIO_PIN(PORT_B, 12),
+    .clk_pin  = GPIO_PIN(PORT_C, 2),
+    .din_af   = GPIO_AF6,
+    .clk_af   = GPIO_AF6,
+    .chan     = 1,
+    .dma      = 0,                    /* DMA1 Channel 4 */
+    .dma_chan = 0,                    /* CxS = 0 */
+};
 /** @} */
 
 #ifdef __cplusplus
