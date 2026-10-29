@@ -45,8 +45,8 @@ static bool _pdm_running = false;
 
 static inline DFSDM_Channel_TypeDef *_channel(unsigned chan)
 {
-    return (DFSDM_Channel_TypeDef *)(DFSDM1_Channel0_BASE + chan *
-            (DFSDM1_Channel1_BASE - DFSDM1_Channel0_BASE));
+    return (DFSDM_Channel_TypeDef *)(DFSDM1_Channel0_BASE + (chan *
+            (DFSDM1_Channel1_BASE - DFSDM1_Channel0_BASE)));
 }
 
 static void _dma_cb(void *arg)
@@ -95,40 +95,6 @@ static void _disable_dfsdm(void)
     DFSDM1_Filter0->FLTCR1 &= ~DFSDM_FLTCR1_DFEN;
     _channel(pdm_config.chan)->CHCFGR1 &= ~DFSDM_CHCFGR1_CHEN;
     DFSDM1_Channel0->CHCFGR1 &= ~DFSDM_CHCFGR1_DFSDMEN;
-}
-
-static inline void _debug(uint8_t chan)
-{
-    DEBUG("[pdm] RCC->APB2ENR:   0x%08lx\n", (unsigned long)RCC->APB2ENR);
-    DEBUG("[pdm] GPIOC->MODER:   0x%08lx\n", (unsigned long)GPIOC->MODER);
-    DEBUG("[pdm] GPIOC->AFR[0]:  0x%08lx\n", (unsigned long)GPIOC->AFR[0]);
-    DEBUG("[pdm] GPIOB->MODER:   0x%08lx\n", (unsigned long)GPIOB->MODER);
-    DEBUG("[pdm] GPIOB->AFR[1]:  0x%08lx\n", (unsigned long)GPIOB->AFR[1]);
-    DEBUG("[pdm] CH0CFGR1:       0x%08lx\n",
-          (unsigned long)DFSDM1_Channel0->CHCFGR1);
-    DEBUG("[pdm] CH%u CFGR1:      0x%08lx\n", chan,
-          (unsigned long)_channel(chan)->CHCFGR1);
-    DEBUG("[pdm] FLT0 FLTCR1:    0x%08lx\n",
-          (unsigned long)DFSDM1_Filter0->FLTCR1);
-    DEBUG("[pdm] FLT0 FLTFCR:    0x%08lx\n",
-          (unsigned long)DFSDM1_Filter0->FLTFCR);
-
-    DEBUG("[pdm] DFSDM1EN: %u (expect 1)\n",
-          (unsigned)((RCC->APB2ENR & RCC_APB2ENR_DFSDM1EN) != 0));
-    DEBUG("[pdm] PC2 mode: %lu (expect 2 = AF), AF: %lu (expect 6)\n",
-          (unsigned long)((GPIOC->MODER >> (2 * 2)) & 0x3),
-          (unsigned long)((GPIOC->AFR[0] >> (2 * 4)) & 0xf));
-    DEBUG("[pdm] PB12 mode: %lu (expect 2 = AF), AF: %lu (expect 6)\n",
-          (unsigned long)((GPIOB->MODER >> (12 * 2)) & 0x3),
-          (unsigned long)((GPIOB->AFR[1] >> ((12 - 8) * 4)) & 0xf));
-    DEBUG("[pdm] CH0CFGR1: 0x%08lx (expect 0x00130000)\n",
-          (unsigned long)DFSDM1_Channel0->CHCFGR1);
-    DEBUG("[pdm] CH%u CFGR1: 0x%08lx (expect 0x00000005)\n",
-          chan, (unsigned long)_channel(chan)->CHCFGR1);
-    DEBUG("[pdm] FLTCR1: 0x%08lx (expect 0x21040000)\n",
-          (unsigned long)DFSDM1_Filter0->FLTCR1);
-    DEBUG("[pdm] FLTFCR: 0x%08lx (expect 0x607C0000)\n",
-          (unsigned long)DFSDM1_Filter0->FLTFCR);
 }
 
 int32_t pdm_init(pdm_mode_t mode, uint32_t rate, int8_t gain,
@@ -183,11 +149,8 @@ int32_t pdm_init(pdm_mode_t mode, uint32_t rate, int8_t gain,
     /* sample on falling CKOUT edge */
     chan->CHCFGR1 |= DFSDM_CHCFGR1_SITP_0 | DFSDM_CHCFGR1_SPICKSEL_0;
 
-    /* Maybe try later to  calibrate OFFSET once after start (average samples in the
-    * discard window of pdm_start) to remove the mic DC offset, like nrf does */
     /* right shift so the filter output fits the 24 bit result register, OFFSET = 0 */
     chan->CHCFGR2 |= rshift << DFSDM_CHCFGR2_DTRBS_Pos;
-
 
     /* read channel continuously, FAST keeps the filter state between samples,
      * enable DMA channel */
@@ -209,7 +172,6 @@ int32_t pdm_init(pdm_mode_t mode, uint32_t rate, int8_t gain,
     (void)rate;
     (void)gain;
 
-    //_debug(pdm_config.chan);
     periph_clk_dis(APB2, RCC_APB2ENR_DFSDM1EN);
     return CLOCK_APB2 / divisor / dec_rat;
 }
