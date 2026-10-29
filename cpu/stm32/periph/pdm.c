@@ -18,9 +18,12 @@
 
 #include <assert.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <errno.h>
 
+#include "container.h"
 #include "periph_conf.h"
+#include "periph_cpu.h"
 #include "periph/gpio.h"
 #include "periph/pdm.h"
 
@@ -44,6 +47,54 @@ static inline DFSDM_Channel_TypeDef *_channel(unsigned chan)
 {
     return (DFSDM_Channel_TypeDef *)(DFSDM1_Channel0_BASE + chan *
             (DFSDM1_Channel1_BASE - DFSDM1_Channel0_BASE));
+}
+
+static void _dma_cb(void *arg)
+{
+    (void)arg;
+
+    /* remaining counts down, more than half left means DMA is still in first
+     * half, so second half is ready */
+    uint8_t idx = dma_get_remaining(pdm_config.dma) > PDM_BUF_SIZE ? 1 : 0;
+    _isr_ctx.cb(_isr_ctx.arg, &_pdm_buf[PDM_BUF_SIZE * idx]);
+}
+
+static void _start_dma(void)
+{
+    dma_acquire(pdm_config.dma);
+    dma_setup(pdm_config.dma,
+              pdm_config.dma_chan,
+              (void *)((uintptr_t)&DFSDM1_Filter0->FLTRDATAR + 2),
+              DMA_PERIPH_TO_MEM, DMA_DATA_WIDTH_HALF_WORD,
+              false);
+    dma_prepare(pdm_config.dma, &_pdm_buf, ARRAY_SIZE(_pdm_buf), true);
+    dma_enable_loop(pdm_config.dma);
+    dma_set_cb(pdm_config.dma, &_dma_cb, NULL);
+    dma_start(pdm_config.dma);
+}
+
+static void _stop_dma(void)
+{
+    dma_stop(pdm_config.dma);
+    dma_disable_loop(pdm_config.dma);
+    dma_release(pdm_config.dma);
+}
+
+static void _enable_dfsdm(void)
+{
+    /* enable DFSDM, channel and filter, then start continuous conversion */
+    DFSDM1_Channel0->CHCFGR1 |= DFSDM_CHCFGR1_DFSDMEN;
+    _channel(pdm_config.chan)->CHCFGR1 |= DFSDM_CHCFGR1_CHEN;
+    DFSDM1_Filter0->FLTCR1 |= DFSDM_FLTCR1_DFEN;
+    DFSDM1_Filter0->FLTCR1 |= DFSDM_FLTCR1_RSWSTART;
+}
+
+static void _disable_dfsdm(void)
+{
+    /* disable DFSDM, channel and filter */
+    DFSDM1_Filter0->FLTCR1 &= ~DFSDM_FLTCR1_DFEN;
+    _channel(pdm_config.chan)->CHCFGR1 &= ~DFSDM_CHCFGR1_CHEN;
+    DFSDM1_Channel0->CHCFGR1 &= ~DFSDM_CHCFGR1_DFSDMEN;
 }
 
 static inline void _debug(uint8_t chan)
@@ -90,6 +141,11 @@ int32_t pdm_init(pdm_mode_t mode, uint32_t rate, int8_t gain,
      * audio when calc sample rate*/
     uint16_t dec_rat = 125;
 
+    /* Later compute from dec_rat. Filter output grows to about dec_rat^SINC_ORDER,
+     * must fit 24 bit: shift = max(0, SINC_ORDER * log2(dec_rat) + 1 - 24)
+     * RM0394 21.4.13, table 105  */
+    uint8_t rshift = 0;
+
     /* Configure mode (Mono or Stereo) */
     switch (mode) {
     case PDM_MODE_MONO:
@@ -122,15 +178,24 @@ int32_t pdm_init(pdm_mode_t mode, uint32_t rate, int8_t gain,
 
     /* reset channel */
     chan->CHCFGR1 = 0;
+    chan->CHCFGR2 = 0;
+
     /* sample on falling CKOUT edge */
     chan->CHCFGR1 |= DFSDM_CHCFGR1_SITP_0 | DFSDM_CHCFGR1_SPICKSEL_0;
 
-    /* read channel continuously, FAST keeps the filter state between samples
-     * (else every sample refills the filter and the rate drops) */
+    /* Maybe try later to  calibrate OFFSET once after start (average samples in the
+    * discard window of pdm_start) to remove the mic DC offset, like nrf does */
+    /* right shift so the filter output fits the 24 bit result register, OFFSET = 0 */
+    chan->CHCFGR2 |= rshift << DFSDM_CHCFGR2_DTRBS_Pos;
+
+
+    /* read channel continuously, FAST keeps the filter state between samples,
+     * enable DMA channel */
     DFSDM1_Filter0->FLTCR1 = 0;
     DFSDM1_Filter0->FLTCR1 |= (pdm_config.chan << DFSDM_FLTCR1_RCH_Pos) |
                               DFSDM_FLTCR1_RCONT |
-                              DFSDM_FLTCR1_FAST;
+                              DFSDM_FLTCR1_FAST |
+                              DFSDM_FLTCR1_RDMAEN;
 
     /* FOSR is dec ratio, FORD is Sinc order (1-5):
        Sinc3 (= 3 moving averages in a row, removes the PDM noise can try out 
@@ -143,40 +208,35 @@ int32_t pdm_init(pdm_mode_t mode, uint32_t rate, int8_t gain,
 
     (void)rate;
     (void)gain;
-    (void)_pdm_running;
-    (void)_pdm_buf;
 
-    _debug(pdm_config.chan);
+    //_debug(pdm_config.chan);
+    periph_clk_dis(APB2, RCC_APB2ENR_DFSDM1EN);
     return CLOCK_APB2 / divisor / dec_rat;
 }
 
 void pdm_start(void)
 {
-    /* enable DFSDM, channel and filter, then start continuous conversion */
-    DFSDM1_Channel0->CHCFGR1 |= DFSDM_CHCFGR1_DFSDMEN;
-    _channel(pdm_config.chan)->CHCFGR1 |= DFSDM_CHCFGR1_CHEN;
-    DFSDM1_Filter0->FLTCR1 |= DFSDM_FLTCR1_DFEN;
-    DFSDM1_Filter0->FLTCR1 |= DFSDM_FLTCR1_RSWSTART;
-
-    while (1) {
-    int32_t min = INT32_MAX;
-    int32_t max = INT32_MIN;
-    for (unsigned i = 0; i < 1600; i++) {
-        while (!(DFSDM1_Filter0->FLTISR & DFSDM_FLTISR_REOCF)) {}
-        int32_t val = (int32_t)DFSDM1_Filter0->FLTRDATAR >> 8;
-        if (val < min) { min = val; }
-        if (val > max) { max = val; }
+    if (_pdm_running) {
+        return;
     }
-    DEBUG("[pdm] min %ld max %ld\n", (long)min, (long)max);
-    }
+    periph_clk_en(APB2, RCC_APB2ENR_DFSDM1EN);
+    _start_dma();
+    _enable_dfsdm();
+    _pdm_running = true;
 }
 
 void pdm_stop(void)
 {
-
+    if (!_pdm_running) {
+        return;
+    }
+    _disable_dfsdm();
+    _stop_dma();
+    periph_clk_dis(APB2, RCC_APB2ENR_DFSDM1EN);
+    _pdm_running = false;
 }
 
 void pdm_deinit(void)
 {
-
+    pdm_stop();
 }
