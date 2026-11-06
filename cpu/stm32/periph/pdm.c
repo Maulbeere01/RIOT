@@ -36,13 +36,13 @@
  * PDM_RATIO_MAX depends on the filter order, change both together */
 #define SINC_ORDER 4
 
-/* Max decimation ratio (FOSR) for Sinc4 (RM0394 21.4.8) */
+/* max decimation ratio (FOSR) for Sinc4 (RM0394 21.4.8) */
 #define PDM_RATIO_MAX 215
 
-/* Lower bound of typical decimation range for PDM mics (AN5027 1.4.3) */
+/* lower bound of typical decimation range for PDM mics (AN5027 1.4.3) */
 #define PDM_RATIO_MIN 48
 
-/* Clock range of the microphone. It depends on the microphone used, so there is
+/* clock range of the microphone. It depends on the microphone used, so there is
  * no default */
 #if !defined(PDM_MIC_CLK_MIN_HZ) || !defined(PDM_MIC_CLK_MAX_HZ)
 #  error "PDM: Define PDM_MIC_CLK_MIN_HZ and PDM_MIC_CLK_MAX_HZ for the microphone used."
@@ -50,15 +50,15 @@
 
 /* CKOUT divider range of the DFSDM module:
  * - min: DFSDM clock must be at least 4x the PDM clock (RM0394 21.4.3)
- * - max: CKOUTDIV allows at most 256 (RM0394 21.7.1) */
+ * - max: CKOUTDIV allows max 256 (RM0394 21.7.1) */
 #define PDM_MODULE_DIV_MIN 4
 #define PDM_MODULE_DIV_MAX 256
 
-/* Divider range of the mic, rounded so the clock stays inside its range */
+/* divider range of the mic, rounded so the clock stays inside its range */
 #define PDM_MIC_DIV_MIN ((CLOCK_APB2 + PDM_MIC_CLK_MAX_HZ - 1) / PDM_MIC_CLK_MAX_HZ)
 #define PDM_MIC_DIV_MAX (CLOCK_APB2 / PDM_MIC_CLK_MIN_HZ)
 
-/* Divider range used by the driver: overlap of module and mic range */
+/* divider range used by the driver: overlap of module and mic range */
 #define PDM_CLK_DIV_MIN MAX(PDM_MODULE_DIV_MIN, PDM_MIC_DIV_MIN)
 #define PDM_CLK_DIV_MAX MIN(PDM_MODULE_DIV_MAX, PDM_MIC_DIV_MAX)
 
@@ -66,14 +66,14 @@
 #  error "PDM: No usable PDM clock, check PDM_MIC_CLK_MIN_HZ and PDM_MIC_CLK_MAX_HZ."
 #endif
 
-/* Sample rate = CLOCK_APB2 / (divider * ratio) */
+/* sample rate = CLOCK_APB2 / (divider * ratio) */
 #define PDM_SAMPLE_RATE_MIN (CLOCK_APB2 / (PDM_CLK_DIV_MAX * PDM_RATIO_MAX))
 #define PDM_SAMPLE_RATE_MAX (CLOCK_APB2 / (PDM_CLK_DIV_MIN * PDM_RATIO_MIN))
 
 /* max of 24 bit signed RDATA field */
-#define PDM_RDATA_MAX ((1UL << 23) - 1)
+#define PDM_RDATA_MAX ((1 << 23) - 1)
 
-/* The samples buffer is a double buffer */
+/* the samples buffer is a double buffer */
 static int16_t _pdm_buf[PDM_BUF_SIZE * 2] = { 0 };
 
 static pdm_isr_ctx_t _isr_ctx;
@@ -82,15 +82,18 @@ static bool _pdm_running = false;
 
 static inline DFSDM_Channel_TypeDef *_channel(unsigned chan)
 {
-    return (DFSDM_Channel_TypeDef *)(DFSDM1_Channel0_BASE + (chan *
-            (DFSDM1_Channel1_BASE - DFSDM1_Channel0_BASE)));
+    uintptr_t size = DFSDM1_Channel1_BASE - DFSDM1_Channel0_BASE;
+
+    return (DFSDM_Channel_TypeDef *)(DFSDM1_Channel0_BASE + chan * size);
 }
 
+/* called on half and full transfer */
 static void _dma_cb(void *arg)
 {
     (void)arg;
 
-    /* more than half left: DMA is still in first half, second half is ready */
+    /* more than half left: DMA wrapped and is back in the first half, so second
+     * half is ready */
     uint8_t idx = dma_get_remaining(pdm_config.dma) > PDM_BUF_SIZE ? 1 : 0;
     _isr_ctx.cb(_isr_ctx.arg, &_pdm_buf[PDM_BUF_SIZE * idx]);
 }
@@ -98,14 +101,19 @@ static void _dma_cb(void *arg)
 static void _start_dma(void)
 {
     dma_acquire(pdm_config.dma);
+
+    /* sample is 24 bit left aligned in FLTRDATAR, API wants 16 bit, so read
+     * only upper half word */
+    void *src = (void *)((uintptr_t)&DFSDM1_Filter0->FLTRDATAR + 2);
     dma_setup(pdm_config.dma,
               pdm_config.dma_chan,
-              (void *)((uintptr_t)&DFSDM1_Filter0->FLTRDATAR + 2),
-              DMA_PERIPH_TO_MEM, DMA_DATA_WIDTH_HALF_WORD,
+              src,
+              DMA_PERIPH_TO_MEM,
+              DMA_DATA_WIDTH_HALF_WORD,
               false);
-    dma_prepare(pdm_config.dma, &_pdm_buf, ARRAY_SIZE(_pdm_buf), true);
+    dma_prepare(pdm_config.dma, _pdm_buf, ARRAY_SIZE(_pdm_buf), true);
     dma_enable_loop(pdm_config.dma);
-    dma_set_cb(pdm_config.dma, &_dma_cb, NULL);
+    dma_set_cb(pdm_config.dma, _dma_cb, NULL);
     dma_start(pdm_config.dma);
 }
 
@@ -145,12 +153,13 @@ static uint16_t _rate_to_ratio(uint32_t rate, uint16_t div)
     return ratio;
 }
 
-/* Filter output grows to ratio^SINC_ORDER (RM0394 table 105), return the
- * smallest right shift that fits it into the 24 bit RDATA */
+/* filter output at full scale input is ratio^SINC_ORDER (RM0394 table 105)
+ * return smallest right shift to fit it into 24 bit result (RDATA) */
 static uint8_t _ratio_to_rshift(uint16_t ratio)
 {
     uint32_t full_scale = powi(ratio, SINC_ORDER);
     uint8_t rshift = 0;
+
     while (full_scale > PDM_RDATA_MAX) {
         rshift++;
         full_scale >>= 1;
@@ -158,7 +167,6 @@ static uint8_t _ratio_to_rshift(uint16_t ratio)
     return rshift;
 }
 
-// Rate = f_DFSDM / (divisor × ratio)
 static uint32_t _set_best_pdm_rate(uint32_t desired_rate)
 {
     if (desired_rate < PDM_SAMPLE_RATE_MIN) {
@@ -171,7 +179,7 @@ static uint32_t _set_best_pdm_rate(uint32_t desired_rate)
     uint16_t best_div = PDM_CLK_DIV_MIN;
     uint32_t smallest_diff = UINT32_MAX;
 
-    /* find div and ratio resulting in sample rate nearest to desired_rate */
+    /* find div and ratio for rate nearest to desired_rate */
     for (uint16_t div = PDM_CLK_DIV_MIN; div <= PDM_CLK_DIV_MAX; div++) {
         uint16_t ratio = _rate_to_ratio(desired_rate, div);
         uint32_t rate = CLOCK_APB2 / (div * ratio);
@@ -187,19 +195,19 @@ static uint32_t _set_best_pdm_rate(uint32_t desired_rate)
 
     /* CKOUT = CLOCK_APB2 / (CKOUTDIV + 1) */
     DFSDM1_Channel0->CHCFGR1 |= (best_div - 1) << DFSDM_CHCFGR1_CKOUTDIV_Pos;
-    /* sample rate = CKOUT / (Ratio + 1) */
+    /* sample rate = CKOUT / (FOSR + 1) */
     DFSDM1_Filter0->FLTFCR |= (ratio - 1) << DFSDM_FLTFCR_FOSR_Pos |
-                             SINC_ORDER << DFSDM_FLTFCR_FORD_Pos;;
+                              (uint32_t)SINC_ORDER << DFSDM_FLTFCR_FORD_Pos;
 
-    /* ,
-     * must fit 24 bit: shift = max(0, SINC_ORDER * log2(ratio) + 1 - 24)
-     * RM0394 21.4.13, table 105  */
-
-    uint8_t rshift = ratio_to_rshift(ratio);
-    /* right shift so the filter output fits the 24 bit result register */
+    uint8_t rshift = _ratio_to_rshift(ratio);
     _channel(pdm_config.chan)->CHCFGR2 |= rshift << DFSDM_CHCFGR2_DTRBS_Pos;
 
-    return CLOCK_APB2 / (best_div * ratio);
+    uint32_t rate = CLOCK_APB2 / (best_div * ratio);
+
+    DEBUG("[PDM] sample rate = %" PRIu32 " Hz, div %u, ratio %u, rshift %u\n",
+          rate, best_div, ratio, rshift);
+
+    return rate;
 }
 
 int32_t pdm_init(pdm_mode_t mode, uint32_t rate, int8_t gain,
@@ -207,11 +215,11 @@ int32_t pdm_init(pdm_mode_t mode, uint32_t rate, int8_t gain,
 {
     assert(pdm_config.chan < 4);
 
-    /* Configure mode (Mono or Stereo) */
     switch (mode) {
     case PDM_MODE_MONO:
         break;
     case PDM_MODE_STEREO:
+        DEBUG("[pdm] init: stereo not supported\n");
         return -ENOTSUP;
     default:
         DEBUG("[pdm] init: mode not supported\n");
@@ -222,12 +230,10 @@ int32_t pdm_init(pdm_mode_t mode, uint32_t rate, int8_t gain,
     RCC->CCIPR &= ~RCC_CCIPR_DFSDM1SEL;
     periph_clk_en(APB2, RCC_APB2ENR_DFSDM1EN);
 
-    /* reset channel 0 and disable DFSDM */
-    DFSDM1_Channel0->CHCFGR1 = 0;
+    /* reset all DFSDM registers */
+    RCC->APB2RSTR |= RCC_APB2RSTR_DFSDM1RST;
+    RCC->APB2RSTR &= ~RCC_APB2RSTR_DFSDM1RST;
 
-    uint32_t real_rate = _set_best_pdm_rate(rate);
-
-    /* configure CLK and DIN pins */
     gpio_init(pdm_config.din_pin, GPIO_IN);
     gpio_init_af(pdm_config.din_pin, pdm_config.din_af);
     gpio_init(pdm_config.clk_pin, GPIO_OUT);
@@ -235,16 +241,11 @@ int32_t pdm_init(pdm_mode_t mode, uint32_t rate, int8_t gain,
 
     DFSDM_Channel_TypeDef *chan = _channel(pdm_config.chan);
 
-    /* reset channel */
-    chan->CHCFGR1 = 0;
-    chan->CHCFGR2 = 0;
-
-    /* sample on falling CKOUT edge */
+    /* sample data on falling edge of own CKOUT */
     chan->CHCFGR1 |= DFSDM_CHCFGR1_SITP_0 | DFSDM_CHCFGR1_SPICKSEL_0;
 
-    /* read channel continuously, FAST keeps the filter state between samples,
-     * enable DMA channel */
-    DFSDM1_Filter0->FLTCR1 = 0;
+    /* read channel continuously, FAST keeps filter state between samples,
+     * request DMA for each result */
     DFSDM1_Filter0->FLTCR1 |= (pdm_config.chan << DFSDM_FLTCR1_RCH_Pos) |
                               DFSDM_FLTCR1_RCONT |
                               DFSDM_FLTCR1_FAST |
@@ -254,6 +255,8 @@ int32_t pdm_init(pdm_mode_t mode, uint32_t rate, int8_t gain,
     _isr_ctx.arg = arg;
 
     (void)gain;
+
+    uint32_t real_rate = _set_best_pdm_rate(rate);
 
     periph_clk_dis(APB2, RCC_APB2ENR_DFSDM1EN);
     return real_rate;
